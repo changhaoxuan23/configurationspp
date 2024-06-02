@@ -1,7 +1,7 @@
 # Maintainer: changhaoxuan23
 _pkgname=configurationspp
 pkgname="$_pkgname-git"
-pkgver=automatic
+pkgver=r2.70afd9b
 pkgrel=1
 pkgdesc="easy to use and powerful command line options parser"
 arch=(x86_64)

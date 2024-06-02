@@ -46,6 +46,24 @@ static auto get_duration_suffix_map() -> const std::unordered_map<std::string, u
   }
   return map;
 }
+
+auto Configurations::StaticOptionConfig::parser() const -> parser_t { return this->parser_; }
+auto Configurations::StaticOptionConfig::parser(parser_t) -> OptionConfig & {
+  throw std::logic_error("cannot modify parser of a common option!");
+}
+void Configurations::StaticOptionConfig::add_option(Configurations &configuration, std::string name) const {
+  configuration.options.emplace_back(std::move(name), this);
+}
+auto Configurations::DynamicOptionConfig::parser() const -> parser_t { return this->parser_; }
+auto Configurations::DynamicOptionConfig::parser(parser_t parser) -> OptionConfig & {
+  this->parser_ = parser;
+  return *this;
+}
+void Configurations::DynamicOptionConfig::add_option(Configurations &configuration, std::string name) const {
+  configuration.dynamic_configs.emplace_front(*this);
+  configuration.options.emplace_back(std::move(name), std::addressof(configuration.dynamic_configs.front()));
+}
+
 auto Configurations::CommonParsers::true_parser(
   parser_argument_iterator_t begin, parser_argument_iterator_t end
 ) -> std::any {
@@ -116,24 +134,63 @@ auto Configurations::CommonParsers::identity_parser(
 auto Configurations::parser_dispatcher(
   const Option &option, size_t &break_point, const std::vector<std::string> &args
 ) -> std::any {
+  // till now we are only sure that the name of option is a prefix of current command line item, but can it
+  //  be the case that we are looking for --abc but the item is actually --abcdef?
   if (args[break_point] == option.name) {
-    if (args.size() <= break_point + option.argument_count) {
-      std::println(stderr, "{} expects arguments but not provided", option.name);
+    // this item is exactly the name, we shall expect something like --abc ...
+    // first, find how many items that looks like a parameter can be found
+    uint8_t parameters_available = 0;
+    for (auto i = break_point + 1; i < args.size(); i++) {
+      if (args[i][0] == '-') {
+        break;
+      }
+      parameters_available++;
+    }
+    // find if parameters SHALL be taken, how many is required
+    uint8_t taking_number = option.config->argument_count_ == OptionConfig::VariableArguments
+                            ? std::max(parameters_available, static_cast<uint8_t>(1))
+                            : option.config->argument_count_;
+    if (parameters_available < taking_number) {
+      // insufficient parameters
+      //  this will only work if the option allows the case that no parameter is being taken
+      if (option.config->optional_argument_) {
+        // ok, pass an empty range
+        return option.config->parser()(args.cbegin(), args.cbegin());
+      }
+      // no, not working
+      std::println(stderr, "insufficient arguments for {}", option.name);
       exit(EXIT_FAILURE);
     }
     auto step = static_cast<parser_argument_iterator_t::difference_type>(++break_point);
-    break_point += option.argument_count;
-    return option.parser(
+    break_point += taking_number;
+    return option.config->parser()(
       std::next(args.cbegin(), step),
-      std::next(args.cbegin(), step + static_cast<decltype(step)>(option.argument_count))
+      std::next(args.cbegin(), step + static_cast<decltype(step)>(taking_number))
     );
-  } else if (option.argument_count == 1 && args[break_point].substr(0, option.name.size() + 1) == (option.name + '=')) {
-    std::vector<std::string> temporary;
-    temporary.emplace_back(args[break_point++].substr(option.name.size() + 1));
-    return option.parser(temporary.cbegin(), temporary.cend());
+  } else if (args[break_point].size() > option.name.size()) {
+    // there are some extra part after the name, we have --abc..., what are they?
+    if (args[break_point][option.name.size()] == '=') {
+      // that is --abc=[...], this works only if the option may take exactly one parameter
+      if (
+        option.config->optional_argument_ == 1                               // exactly one
+        || option.config->argument_count_ == OptionConfig::VariableArguments // variable: one is acceptable
+      ) {
+        std::vector<std::string> temporary;
+        temporary.emplace_back(args[break_point++].substr(option.name.size() + 1));
+        return option.config->parser()(temporary.cbegin(), temporary.cend());
+      } else {
+        // no, this will not work
+        std::println(stderr, "invalid option string {} with option name {}", args[break_point], option.name);
+        exit(EXIT_FAILURE);
+      }
+    } else {
+      // that is something like --abcdef: not what we should care about, we just care about --abc
+      // return an empty std::any
+      return {};
+    }
   } else {
-    std::println(stderr, "invalid option string {} with option name {}", args[break_point], option.name);
-    exit(EXIT_FAILURE);
+    // we do not expect the control flow to reach here
+    assert(false);
   }
 }
 auto Configurations::test_option(
@@ -147,7 +204,10 @@ auto Configurations::test_option(
 }
 
 void Configurations::add_option(const std::string &name, const parser_t &parser, size_t argument_count) {
-  this->options.emplace_back(parser, name, argument_count);
+  DynamicOptionConfig().parser(parser).argument_count(argument_count).add_option(*this, name);
+}
+void Configurations::add_option(const std::string &name, const OptionConfig &modifier) {
+  modifier.add_option(*this, name);
 }
 
 auto Configurations::parse(const std::vector<std::string> &args) const -> Configurations::parse_result_t {
