@@ -155,6 +155,7 @@ auto Configurations::parser_dispatcher(
       //  this will only work if the option allows the case that no parameter is being taken
       if (option.config->optional_argument_) {
         // ok, pass an empty range
+        ++break_point;
         return option.config->parser()(args.cbegin(), args.cbegin());
       }
       // no, not working
